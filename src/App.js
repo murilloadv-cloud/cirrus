@@ -417,7 +417,7 @@ function VisaoInstrumentador({ usuario }) {
     setLoading(false);
   };
 
-  useEffect(() => { buscarDados(); }, [usuario.id]);
+  useEffect(() => { buscarDados(); }, [usuario.id, buscarDados]);
 
   // Realtime: novo chamado aparece no feed automaticamente
   useEffect(() => {
