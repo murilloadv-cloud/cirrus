@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { solicitarPermissaoNotificacao, ouvirNotificacoes } from "./firebase";
 import { supabase } from "./supabase";
 
 const NAVY = "#0A1628";
@@ -700,6 +701,16 @@ export default function App() {
     });
     return () => subscription.unsubscribe();
   }, []);
+useEffect(() => {
+    if (usuario) {
+      solicitarPermissaoNotificacao().then(token => {
+        if (token) localStorage.setItem("fcm_token", token);
+      });
+      ouvirNotificacoes((payload) => {
+        alert(`🔔 ${payload.notification?.title}\n${payload.notification?.body}`);
+      });
+    }
+  }, [usuario]);
   const handleLogout = async () => { await supabase.auth.signOut(); setUsuario(null); };
   if (loading) return <div style={{ display:"flex", justifyContent:"center", alignItems:"center", minHeight:"100vh", background:"#C8D4DE" }}><div style={{ textAlign:"center" }}><CirrusLogo size={48} /><p style={{ color:SLATE, fontSize:13, marginTop:12 }}>Carregando...</p></div></div>;
   return (
