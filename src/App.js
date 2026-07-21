@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { solicitarPermissaoNotificacao, ouvirNotificacoes } from "./firebase";
+import { criarPagamento } from "./stripe";
 import { supabase } from "./supabase";
 
 const NAVY = "#0A1628";
@@ -277,6 +278,22 @@ function VisaoContratante({ usuario, perfil }) {
       urgencia: form.urgencia, observacoes: form.obs,
       valor_ofertado: valor, instrumentador_id: solicitado?.id || null, status: "aberto"
     });
+    if (!error && valor > 0) {
+      const pag = await criarPagamento({
+        valor,
+        descricao: `Cirrus — ${form.cirurgia} com ${solicitado?.perfis?.nome || "instrumentador"}`,
+        emailPagador: usuario.email || "",
+        chamadoId: usuario.id
+      });
+      if (pag.success) {
+        await supabase.from("transacoes").insert({
+          pagador_id: usuario.id,
+          recebedor_id: solicitado?.id || null,
+          valor: valor,
+          status: "pendente"
+        });
+      }
+    }
     setSalvando(false);
     if (!error) { setFormOk(true); setSolicitado(null); }
     else alert("Erro ao salvar: " + error.message);
@@ -418,7 +435,7 @@ function VisaoInstrumentador({ usuario }) {
     setLoading(false);
   };
 
-  useEffect(() => { buscarDados(); }, [usuario.id, buscarDados]);
+  useEffect(() => { buscarDados(); }, [usuario.id]);
 
   // Realtime: novo chamado aparece no feed automaticamente
   useEffect(() => {
@@ -701,7 +718,8 @@ export default function App() {
     });
     return () => subscription.unsubscribe();
   }, []);
-useEffect(() => {
+
+  useEffect(() => {
     if (usuario) {
       solicitarPermissaoNotificacao().then(token => {
         if (token) localStorage.setItem("fcm_token", token);
@@ -711,6 +729,7 @@ useEffect(() => {
       });
     }
   }, [usuario]);
+
   const handleLogout = async () => { await supabase.auth.signOut(); setUsuario(null); };
   if (loading) return <div style={{ display:"flex", justifyContent:"center", alignItems:"center", minHeight:"100vh", background:"#C8D4DE" }}><div style={{ textAlign:"center" }}><CirrusLogo size={48} /><p style={{ color:SLATE, fontSize:13, marginTop:12 }}>Carregando...</p></div></div>;
   return (
