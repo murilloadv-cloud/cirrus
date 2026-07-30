@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { solicitarPermissaoNotificacao, ouvirNotificacoes } from "./firebase";
-import { criarPagamento } from "./stripe";
+import { criarCheckoutSession } from "./stripe";
 import { supabase } from "./supabase";
 
 const NAVY = "#0A1628";
@@ -132,7 +132,7 @@ function Onboarding({ onConcluir }) {
       if (perfilSel === "medico") await supabase.from("medicos").insert({ id: user.id, crm: vals["CRM"] || "", especialidade: vals["Especialidade"] || "" });
       if (perfilSel === "hospital") await supabase.from("hospitais").insert({ id: user.id, cnpj: vals["CNPJ"] || "", nome_instituicao: vals["Nome do hospital"] || "" });
       if (perfilSel === "opme") await supabase.from("empresas_opme").insert({ id: user.id, cnpj: vals["CNPJ"] || "", nome_empresa: vals["Nome da empresa"] || "", representante: vals["Representante"] || "" });
-      onConcluir({ tipo: perfilSel, nome, id: user.id });
+      onConcluir({ tipo: perfilSel, nome, id: user.id, email });
     } catch (e) { setErro(e.message || "Erro ao criar conta."); }
     setLoading(false);
   };
@@ -143,7 +143,7 @@ function Onboarding({ onConcluir }) {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password: senha });
       if (error) throw error;
       const { data: perfil } = await supabase.from("perfis").select("*").eq("id", data.user.id).single();
-      onConcluir({ tipo: perfil?.tipo || "medico", nome: perfil?.nome || email, id: data.user.id });
+      onConcluir({ tipo: perfil?.tipo || "medico", nome: perfil?.nome || email, id: data.user.id, email: perfil?.email || email });
     } catch (e) { setErro(e.message || "E-mail ou senha incorretos."); }
     setLoading(false);
   };
@@ -224,11 +224,23 @@ function VisaoContratante({ usuario, perfil }) {
   const [form, setForm] = useState({ cirurgia: "", especialidade: "Ortopedia", data: "", hora: "", urgencia: "eletiva", obs: "" });
   const [salvando, setSalvando] = useState(false);
   const [formOk, setFormOk] = useState(false);
+  const [pagamentoStatus, setPagamentoStatus] = useState(null);
   const esps = ["Todas","Ortopedia","Cardiovascular","Neurologia","Coluna","Oncologia","Urologia","Geral"];
   const meta = { medico: { label: "Médico", color: "#3B82F6" }, hospital: { label: "Hospital", color: TEAL }, opme: { label: "OPME", color: AMBER } }[perfil] || { label: perfil, color: SLATE };
   const inputStyle = { width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 10, border: `1px solid ${BORDER}`, fontSize: 13, outline: "none", background: "#fff" };
   const labelStyle = { fontSize: 10, fontWeight: 700, color: SLATE, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: 0.5 };
   const getIniciais = (nome = "") => nome.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
+
+  // Volta do Stripe Checkout: ?pagamento=sucesso ou ?pagamento=cancelado
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("pagamento");
+    if (status === "sucesso" || status === "cancelado") {
+      setPagamentoStatus(status);
+      setTab("historico");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   useEffect(() => {
     const buscarInstrumentadores = async () => {
@@ -271,32 +283,45 @@ function VisaoContratante({ usuario, perfil }) {
     setSalvando(true);
     const dataHora = form.data && form.hora ? new Date(`${form.data}T${form.hora}`) : new Date();
     const valor = solicitado ? (solicitado.valor_hora || 0) : 0;
-    const { error } = await supabase.from("chamados").insert({
+    const { data: chamado, error } = await supabase.from("chamados").insert({
       solicitante_id: usuario.id, tipo_solicitante: perfil,
       cirurgia: form.cirurgia || "A definir", especialidade: form.especialidade,
       data_procedimento: dataHora.toISOString(), duracao_horas: 1,
       urgencia: form.urgencia, observacoes: form.obs,
       valor_ofertado: valor, instrumentador_id: solicitado?.id || null, status: "aberto"
-    });
-    if (!error && valor > 0) {
-      const pag = await criarPagamento({
-        valor,
-        descricao: `Cirrus — ${form.cirurgia} com ${solicitado?.perfis?.nome || "instrumentador"}`,
-        emailPagador: usuario.email || "",
-        chamadoId: usuario.id
-      });
-      if (pag.success) {
-        await supabase.from("transacoes").insert({
-          pagador_id: usuario.id,
-          recebedor_id: solicitado?.id || null,
-          valor: valor,
-          status: "pendente"
-        });
+    }).select().single();
+
+    if (error) { setSalvando(false); alert("Erro ao salvar: " + error.message); return; }
+
+    if (valor > 0) {
+      const { data: transacao, error: errTx } = await supabase.from("transacoes").insert({
+        chamado_id: chamado.id, pagador_id: usuario.id, recebedor_id: solicitado?.id || null,
+        valor, status: "pendente"
+      }).select().single();
+
+      if (errTx) {
+        setSalvando(false);
+        alert("Chamado criado, mas houve um erro ao preparar o pagamento: " + errTx.message);
+        setFormOk(true); setSolicitado(null);
+        return;
       }
+
+      const pag = await criarCheckoutSession({
+        chamadoId: chamado.id, transacaoId: transacao.id, valor,
+        descricao: `Cirrus — ${form.cirurgia} com ${solicitado?.perfis?.nome || "instrumentador"}`,
+        emailPagador: usuario.email || ""
+      });
+
+      if (pag.success) { window.location.href = pag.url; return; }
+
+      setSalvando(false);
+      alert("Chamado criado, mas houve um erro ao iniciar o pagamento: " + pag.error + ". Tente novamente pelo histórico.");
+      setFormOk(true); setSolicitado(null);
+      return;
     }
+
     setSalvando(false);
-    if (!error) { setFormOk(true); setSolicitado(null); }
-    else alert("Erro ao salvar: " + error.message);
+    setFormOk(true); setSolicitado(null);
   };
 
   const handlePublicar = async () => {
@@ -391,7 +416,26 @@ function VisaoContratante({ usuario, perfil }) {
           )
         )}
 
-        {tab === "historico" && (
+        {tab === "historico" && pagamentoStatus && (
+          <div style={{ textAlign: "center", padding: "40px 20px" }}>
+            {pagamentoStatus === "sucesso" ? (
+              <>
+                <div style={{ width: 56, height: 56, borderRadius: "50%", background: TEAL_LIGHT, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", fontSize: 24 }}>✓</div>
+                <p style={{ fontWeight: 700, fontSize: 17, color: NAVY, margin: "0 0 6px" }}>Pagamento confirmado!</p>
+                <p style={{ fontSize: 13, color: SLATE, margin: "0 0 28px" }}>Seu chamado foi registrado. O instrumentador será notificado.</p>
+              </>
+            ) : (
+              <>
+                <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#FEE2E2", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", fontSize: 24 }}>✕</div>
+                <p style={{ fontWeight: 700, fontSize: 17, color: NAVY, margin: "0 0 6px" }}>Pagamento não concluído</p>
+                <p style={{ fontSize: 13, color: SLATE, margin: "0 0 28px" }}>O chamado foi salvo, mas o pagamento foi cancelado. Você pode tentar pagar novamente em breve.</p>
+              </>
+            )}
+            <button onClick={() => setPagamentoStatus(null)} style={{ background: NAVY, color: "#fff", border: "none", borderRadius: 12, padding: "11px 28px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ver histórico completo</button>
+          </div>
+        )}
+
+        {tab === "historico" && !pagamentoStatus && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {loadingChamados ? <Loading msg="Carregando histórico..." /> : chamados.length === 0 ? <Vazio msg="Nenhum chamado publicado ainda." /> : chamados.map(c => {
               const st = statusCfg[c.status] || statusCfg.aberto;
@@ -709,7 +753,7 @@ export default function App() {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
         const { data: perfil } = await supabase.from("perfis").select("*").eq("id",session.user.id).single();
-        if (perfil) setUsuario({ tipo:perfil.tipo, nome:perfil.nome, id:perfil.id });
+        if (perfil) setUsuario({ tipo:perfil.tipo, nome:perfil.nome, id:perfil.id, email:perfil.email });
       }
       setLoading(false);
     });
