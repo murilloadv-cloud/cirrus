@@ -11,27 +11,32 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const messaging = getMessaging(app);
+
+const isSupported = () =>
+  'Notification' in window &&
+  'serviceWorker' in navigator &&
+  'PushManager' in navigator;
 
 export const solicitarPermissaoNotificacao = async () => {
+  if (!isSupported()) return null;
   try {
+    const messaging = getMessaging(app);
     const token = await getToken(messaging, {
       vapidKey: 'BJPYFJYMWP_o4xUAnC4zSGrvKSLl2_2JoXKs-'
     });
-    if (token) {
-      console.log('Token FCM:', token);
-      return token;
-    }
+    if (token) return token;
   } catch (err) {
-    console.log('Erro ao obter token:', err);
+    console.log('Erro FCM:', err);
   }
   return null;
 };
 
 export const ouvirNotificacoes = (callback) => {
-  onMessage(messaging, (payload) => {
-    callback(payload);
-  });
+  if (!isSupported()) return;
+  try {
+    const messaging = getMessaging(app);
+    onMessage(messaging, callback);
+  } catch (err) {
+    console.log('Erro onMessage:', err);
+  }
 };
-
-export { messaging };
